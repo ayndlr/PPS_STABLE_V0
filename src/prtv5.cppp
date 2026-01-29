@@ -1,0 +1,194 @@
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <limits>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+struct Vec3 {
+  float x, y, z;
+
+  Vec3() : x(0), y(0), z(0) {}
+  Vec3(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
+
+  Vec3 operator+(const Vec3& v) const { return Vec3(x + v.x, y + v.y, z + v.z); }
+  Vec3 operator-(const Vec3& v) const { return Vec3(x - v.x, y - v.y, z - v.z); }
+  Vec3 operator*(float t) const { return Vec3(x * t, y * t, z * t); }
+  Vec3 operator/(float t) const { return Vec3(x / t, y / t, z / t); }
+
+  float dot(const Vec3& v) const { return x * v.x + y * v.y + z * v.z; }
+  Vec3 cross(const Vec3& v) const {
+    return Vec3(y * v.z - z * v.y, z * v.x - x * v.z, x * v.y - y * v.x);
+  }
+
+  float length() const { return std::sqrt(x * x + y * y + z * z); }
+  Vec3 normalize() const {
+    float len = length();
+    return len > 1e-8f ? *this / len : Vec3(0, 0, 0);
+  }
+};
+
+struct Ray {
+  Vec3 origin, dir;
+  Ray() {}
+  Ray(const Vec3& o, const Vec3& d) : origin(o), dir(d.normalize()) {}
+  Vec3 at(float t) const { return origin + dir * t; }
+};
+
+struct Hit {
+  float t;
+  Vec3 point, normal;
+  float u, v, w;
+  Vec3 color;
+  bool hit;
+  Hit() : t(std::numeric_limits<float>::infinity()), hit(false), u(0), v(0), w(0), color(0,0,0) {}
+};
+
+struct Camera {
+  Vec3 origin, forward, right, up;
+  float fov, aspectRatio;
+
+  Camera(Vec3 o, Vec3 f, float _fov, float _aspect)
+      : origin(o), forward(f.normalize()), fov(_fov), aspectRatio(_aspect) {
+    Vec3 worldUp(0, 1, 0);
+    right = forward.cross(worldUp).normalize();
+    up = right.cross(forward).normalize();
+  }
+
+  Ray getRay(float x, float y, int W, int H) {
+    float fovRadians = fov * 3.14159f / 180.0f;
+    float tanHalfFov = std::tan(fovRadians / 2.0f);
+
+    float ndcX = (2.0f * x) / W - 1.0f;
+    float ndcY = 1.0f - (2.0f * y) / H;
+
+    float rayX = ndcX * aspectRatio * tanHalfFov;
+    float rayY = ndcY * tanHalfFov;
+
+    Vec3 rayDir = (forward + right * rayX + up * rayY).normalize();
+    return Ray(origin, rayDir);
+  }
+};
+
+struct Triangle {
+  Vec3 v0, v1, v2;
+  Vec3 c0, c1, c2;  // Vertex colors for interpolation
+
+  Triangle(Vec3 _v0, Vec3 _v1, Vec3 _v2, Vec3 _c0, Vec3 _c1, Vec3 _c2) 
+      : v0(_v0), v1(_v1), v2(_v2), c0(_c0), c1(_c1), c2(_c2) {}
+
+  bool intersectPRT(const Ray& ray, Hit& hit) {
+    Vec3 e0 = v1 - v0;
+    Vec3 e1 = v2 - v0;
+    Vec3 N = e0.cross(e1);
+    Vec3 h_vec = N * 0.5f;
+
+    // ========== PART 1: FINITE-PLANE GUARD ==========
+    float h = ray.dir.dot(h_vec);
+    
+    if (h >= 0 || fabs(h) < 1e-8f) {
+      return false;
+    }
+
+    // ========== PART 2: SOLVE FOR t ON FINITE PLANE ==========
+    float fastHit = (v0 - ray.origin).dot(h_vec);
+    float t = fastHit / h;
+
+    if (t < 1e-8f) {
+      return false;
+    }
+
+    // ========== PART 3: GET POINT P ==========
+    Vec3 P = ray.at(t);
+
+    // ========== PART 4: PURE VECTOR ALIGNMENT ==========
+    float u = P.dot(e0.normalize());
+    float v = P.dot(e1.normalize());
+    float w = 1.0f - u - v;
+
+    // ========== PART 5: BOUNDS CHECK ==========
+    if (u < 0 || u > 1 || v < 0 || v > 1 || w < 0 || w > 1) {
+      return false;
+    }
+
+    // ========== PART 6: INTERPOLATE COLOR ==========
+    Vec3 interpolatedColor = c0 * w + c1 * u + c2 * v;
+
+    // ========== RECORD HIT ==========
+    hit.t = t;
+    hit.point = P;
+    hit.normal = N.normalize();
+    hit.u = u;
+    hit.v = v;
+    hit.w = w;
+    hit.color = interpolatedColor;
+    hit.hit = true;
+
+    return true;
+  }
+};
+
+int main() {
+  int W = 1024, H = 768;
+  std::vector<uint8_t> framebuffer(W * H * 3, 0);
+
+  // Camera positioned to see triangle head-on
+  Camera cam(Vec3(0, 0, 0), Vec3(0, 0, -1), 60, (float)W / H);
+
+  // BIG triangle in front of camera, well-oriented
+  // v0 = left, v1 = right, v2 = top
+  Triangle tri(
+    Vec3(-3, -2, -8),   // v0 - left bottom
+    Vec3(3, -2, -8),    // v1 - right bottom
+    Vec3(0, 4, -8),     // v2 - top center
+    Vec3(1, 0, 0),      // c0 - RED
+    Vec3(0, 1, 0),      // c1 - GREEN
+    Vec3(0, 0, 1)       // c2 - BLUE
+  );
+
+  std::cout << "=== PRT RAY TRACER (INTERPOLATED) ===\n";
+  std::cout << "Triangle vertices:\n";
+  std::cout << "v0 (RED):   (" << tri.v0.x << ", " << tri.v0.y << ", " << tri.v0.z << ")\n";
+  std::cout << "v1 (GREEN): (" << tri.v1.x << ", " << tri.v1.y << ", " << tri.v1.z << ")\n";
+  std::cout << "v2 (BLUE):  (" << tri.v2.x << ", " << tri.v2.y << ", " << tri.v2.z << ")\n";
+  std::cout << "Camera at: (0, 0, 0) looking at -Z\n\n";
+
+  int hitCount = 0;
+
+  for (int y = 0; y < H; y++) {
+    if (y % 100 == 0)
+      std::cout << "Progress: " << y << "/" << H << "\n";
+
+    for (int x = 0; x < W; x++) {
+      Ray ray = cam.getRay(x, y, W, H);
+      Hit hit;
+
+      if (tri.intersectPRT(ray, hit)) {
+        hitCount++;
+        
+        // Clamp color to [0, 1] and convert to [0, 255]
+        uint8_t r = (uint8_t)(std::max(0.0f, std::min(1.0f, hit.color.x)) * 255);
+        uint8_t g = (uint8_t)(std::max(0.0f, std::min(1.0f, hit.color.y)) * 255);
+        uint8_t b = (uint8_t)(std::max(0.0f, std::min(1.0f, hit.color.z)) * 255);
+
+        framebuffer[(y * W + x) * 3 + 0] = r;
+        framebuffer[(y * W + x) * 3 + 1] = g;
+        framebuffer[(y * W + x) * 3 + 2] = b;
+      } else {
+        // Background: light gray
+        framebuffer[(y * W + x) * 3 + 0] = 200;
+        framebuffer[(y * W + x) * 3 + 1] = 200;
+        framebuffer[(y * W + x) * 3 + 2] = 200;
+      }
+    }
+  }
+
+  stbi_write_png("prt_interpolated.png", W, H, 3, framebuffer.data(), W * 3);
+  std::cout << "\nTotal hits: " << hitCount << " / " << (W * H) << "\n";
+  std::cout << "Hit percentage: " << (100.0f * hitCount / (W * H)) << "%\n";
+  std::cout << "Saved as prt_interpolated.png\n";
+
+  return 0;
+}

@@ -1,0 +1,223 @@
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <limits>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+// ============================================================================
+// Vector Math
+// ============================================================================
+
+struct Vec3 {
+  float x, y, z;
+
+  Vec3() : x(0), y(0), z(0) {}
+  Vec3(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
+
+  Vec3 operator+(const Vec3& v) const { return Vec3(x + v.x, y + v.y, z + v.z); }
+  Vec3 operator-(const Vec3& v) const { return Vec3(x - v.x, y - v.y, z - v.z); }
+  Vec3 operator*(float t) const { return Vec3(x * t, y * t, z * t); }
+  Vec3 operator/(float t) const { return Vec3(x / t, y / t, z / t); }
+
+  float dot(const Vec3& v) const { return x * v.x + y * v.y + z * v.z; }
+  Vec3 cross(const Vec3& v) const {
+    return Vec3(y * v.z - z * v.y, z * v.x - x * v.z, x * v.y - y * v.x);
+  }
+
+  float length() const { return std::sqrt(x * x + y * y + z * z); }
+  Vec3 normalize() const {
+    float len = length();
+    return len > 1e-8f ? *this / len : Vec3(0, 0, 0);
+  }
+
+  Vec3 clamp(float minVal, float maxVal) const {
+    return Vec3(std::max(minVal, std::min(maxVal, x)),
+                std::max(minVal, std::min(maxVal, y)),
+                std::max(minVal, std::min(maxVal, z)));
+  }
+};
+
+struct Ray {
+  Vec3 origin, dir;
+  Ray() {}
+  Ray(const Vec3& o, const Vec3& d) : origin(o), dir(d.normalize()) {}
+  Vec3 at(float t) const { return origin + dir * t; }
+};
+
+struct Hit {
+  float t;
+  Vec3 point, normal;
+  float u, v, w;
+  bool hit;
+  Hit() : t(std::numeric_limits<float>::infinity()), hit(false) {}
+};
+
+// ============================================================================
+// Camera
+// ============================================================================
+
+struct Camera {
+  Vec3 origin, forward, right, up;
+  float fov, aspectRatio;
+
+  Camera(Vec3 o, Vec3 f, float _fov, float _aspect)
+      : origin(o), forward(f.normalize()), fov(_fov), aspectRatio(_aspect) {
+    // Build orthonormal basis
+    Vec3 worldUp(0, 1, 0);
+    right = forward.cross(worldUp).normalize();
+    up = right.cross(forward).normalize();
+  }
+
+  Ray getRay(float x, float y, int W, int H) {
+    float fovRadians = fov * 3.14159f / 180.0f;
+    float tanHalfFov = std::tan(fovRadians / 2.0f);
+
+    float ndcX = (2.0f * x) / W - 1.0f;
+    float ndcY = 1.0f - (2.0f * y) / H;
+
+    float rayX = ndcX * aspectRatio * tanHalfFov;
+    float rayY = ndcY * tanHalfFov;
+
+    Vec3 rayDir = (forward + right * rayX + up * rayY).normalize();
+    return Ray(origin, rayDir);
+  }
+};
+
+// ============================================================================
+// Triangle with PRT
+// ============================================================================
+
+struct Triangle {
+  Vec3 v0, v1, v2;
+  Vec3 color;
+
+  Triangle(Vec3 _v0, Vec3 _v1, Vec3 _v2, Vec3 _color)
+      : v0(_v0), v1(_v1), v2(_v2), color(_color) {}
+
+  bool intersectPRT(const Ray& ray, Hit& hit) {
+    Vec3 e0 = v1 - v0;
+    Vec3 e1 = v2 - v0;
+    Vec3 N = e0.cross(e1);
+
+    // PRT: Check if ray is anti-parallel to normal (real hit)
+    // h can be N or N*.5
+    float h = ray.dir.dot(N*.5);
+
+    std::cout << "Ray dir: (" << ray.dir.x << ", " << ray.dir.y << ", "
+              << ray.dir.z << ")\n";
+    std::cout << "Normal N: (" << N.x << ", " << N.y << ", " << N.z << ")\n";
+    std::cout << "h = " << h << "\n";
+
+    if (h >= 0) {
+      std::cout << "Rejected: h >= 0 (not anti-parallel)\n";
+      return false;
+    }
+    if (fabs(h) < 1e-8f) {
+      std::cout << "Rejected: |h| too small (nearly parallel)\n";
+      return false;
+    }
+
+    // Solve for t on the finite plane
+    float fastHit = (v0 - ray.origin).dot(N*.5);
+    float t = fastHit / h;
+
+    std::cout << "fastHit = " << fastHit << ", t = " << t << "\n";
+
+    if (t < 1e-8f) {
+      std::cout << "Rejected: t < epsilon (behind ray)\n";
+      return false;
+    }
+
+    // Intersection point
+    Vec3 P = ray.at(t);
+
+    // Barycentric coordinates
+    Vec3 e0xp = e0.cross(P - v0);
+    Vec3 e1xp = e1.cross(P - v0);
+
+    float NN = N.dot(N);
+    float u = N.dot(e0xp) / NN;
+    float v = N.dot(e1xp) / NN;
+    float w = 1.0f - u - v;
+
+    std::cout << "Barycentric: u=" << u << " v=" << v << " w=" << w << "\n";
+
+    if (u < 0 || v < 0 || w < 0) {
+      std::cout << "Rejected: Outside triangle\n";
+      return false;
+    }
+
+    hit.t = t;
+    hit.point = P;
+    hit.normal = N.normalize();
+    hit.u = u;
+    hit.v = v;
+    hit.w = w;
+    hit.hit = true;
+
+    std::cout << "*** HIT CONFIRMED ***\n";
+    return true;
+  }
+};
+
+// ============================================================================
+// Main Render Loop
+// ============================================================================
+
+int main() {
+  int W = 800, H = 600;
+  std::vector<uint8_t> framebuffer(W * H * 3, 0);
+
+  // Camera setup
+  Camera cam(Vec3(0, 2, 5), Vec3(0, 0, -1), 90, (float)W / H);
+
+  // Create a single triangle
+  Triangle tri(Vec3(-1, -1, -3), Vec3(1, 1, -3), Vec3(0, 4, -3), Vec3(1, 1, 0));
+
+  std::cout << "Triangle vertices:\n";
+  std::cout << "v0: (" << tri.v0.x << ", " << tri.v0.y << ", " << tri.v0.z
+            << ")\n";
+  std::cout << "v1: (" << tri.v1.x << ", " << tri.v1.y << ", " << tri.v1.z
+            << ")\n";
+  std::cout << "v2: (" << tri.v2.x << ", " << tri.v2.y << ", " << tri.v2.z
+            << ")\n";
+
+  // Render
+  for (int y = 0; y < H; y++) {
+    if (y % 100 == 0)
+      std::cout << "Progress: " << y << "/" << H << "\n";
+
+    for (int x = 0; x < W; x++) {
+      Ray ray = cam.getRay(x, y, W, H);
+      Hit hit;
+
+      // Only print debug for center pixel
+      if (x == W / 2 && y == H / 2) {
+        std::cout << "\n=== CENTER PIXEL ===\n";
+        std::cout << "Ray origin: (" << ray.origin.x << ", " << ray.origin.y
+                  << ", " << ray.origin.z << ")\n";
+        std::cout << "Ray dir: (" << ray.dir.x << ", " << ray.dir.y << ", "
+                  << ray.dir.z << ")\n";
+      }
+
+      if (tri.intersectPRT(ray, hit)) {
+        framebuffer[(y * W + x) * 3 + 0] = (uint8_t)(hit.u * 255);
+        framebuffer[(y * W + x) * 3 + 1] = (uint8_t)(hit.v * 255);
+        framebuffer[(y * W + x) * 3 + 2] = (uint8_t)(hit.w * 255);
+      } else {
+        framebuffer[(y * W + x) * 3 + 0] = 255;
+        framebuffer[(y * W + x) * 3 + 1] = 255;
+        framebuffer[(y * W + x) * 3 + 2] = 255;
+      }
+    }
+  }
+
+  // Write image
+  stbi_write_png("prt_test.png", W, H, 3, framebuffer.data(), W * 3);
+  std::cout << "Image saved as prt_test.png\n";
+
+  return 0;
+}
