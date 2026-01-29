@@ -37,7 +37,7 @@ I built this engine to understand the math behind computer graphics. It was deve
 
 1.  **Clone the repo:**
     ```bash
-    git clone [https://github.com/ayndlr/PPS_STABLE_V0.git](https://github.com/ayndlr/PPS_STABLE_V0.git)
+    git clone https://github.com/ayndlr/PPS_STABLE_V0.git
     ```
 2.  **Build:**
     (Include your compilation instructions here, e.g., using g++ or make)
